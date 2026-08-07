@@ -61,9 +61,7 @@ static bool initRadio(RF24& radio) {
 
 // ─── Jamming Task ──────────────────────────────────────────
 static void jammerTask(void* pv) {
-  #if CONFIG_IDF_TARGET_ESP32
-    esp_task_wdt_delete(NULL);
-  #endif
+  // (No watchdog delete – we deinit the whole watchdog in setup)
 
   // Prepare junk payload
   for (int i = 0; i < PAYLOAD_SIZE; i++) {
@@ -120,7 +118,7 @@ static void jammerTask(void* pv) {
     RadioB.txStandBy(10);
     RadioC.txStandBy(10);
 
-    // 🔥 10 µs CPU rest – gives ESP32 breathing room
+    // 🔥 10 µs CPU rest
     esp_rom_delay_us(10);
 
     // Count successes
@@ -230,8 +228,9 @@ bool btJammerToggle() {
 
 // ─── Setup / Loop ──────────────────────────────────────────
 void setup() {
-  // 🔥 Disable watchdog on core 0 to prevent TG1WDT_SYS_RESET
-  disableCore0WDT();
+  // 🔥 Disable both interrupt and task watchdog completely
+  disableCore0WDT();          // interrupt watchdog on core0
+  esp_task_wdt_deinit();      // task watchdog (this removes all WDT tasks)
 
   Serial.begin(115200);
   delay(500);
