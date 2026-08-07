@@ -38,7 +38,7 @@ static RF24 RadioA(NRF_CE_PIN_A, NRF_CSN_PIN_A);
 static RF24 RadioB(NRF_CE_PIN_B, NRF_CSN_PIN_B);
 static RF24 RadioC(NRF_CE_PIN_C, NRF_CSN_PIN_C);
 
-// ─── Channel Tables – WITHOUT explicit size ──────────────
+// ─── Channel Tables ────────────────────────────────────────
 static const uint8_t oddChannels[] = {
   1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,
   1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,
@@ -71,11 +71,11 @@ static const uint8_t mixedChannels[] = {
 // ─── Global State ──────────────────────────────────────────
 static volatile bool _btActive = false;
 static volatile bool _btStopping = false;
-static volatile uint16_t _btIndex = 0;        // 🔥 uint16_t ताकि साइज़ 256 तक जा सके
+static volatile uint16_t _btIndex = 0;
 static SemaphoreHandle_t _btSpiMutex = NULL;
 static TaskHandle_t _btJammerTaskHandle = NULL;
 static uint8_t _junk[32];
-static size_t _channelCount = 0;              // तीनों ऐरे में सबसे छोटा साइज़
+static size_t _channelCount = 0;
 
 // ─── Configure nRF24 ──────────────────────────────────────
 static void _configRadio(RF24& radio) {
@@ -124,7 +124,6 @@ static void _btJammerTask(void* pv) {
     }
 
     if (xSemaphoreTake(_btSpiMutex, 0) == pdTRUE) {
-      // 🔥 अब _btIndex को channelCount के हिसाब से रखें
       RadioA.setChannel(oddChannels[_btIndex % _channelCount]);
       RadioB.setChannel(evenChannels[_btIndex % _channelCount]);
       RadioC.setChannel(mixedChannels[_btIndex % _channelCount]);
@@ -133,9 +132,10 @@ static void _btJammerTask(void* pv) {
       RadioB.flush_tx();
       RadioC.flush_tx();
 
-      RadioA.writeFast(_junk, 32, 0);
-      RadioB.writeFast(_junk, 32, 0);
-      RadioC.writeFast(_junk, 32, 0);
+      // 🔥 FIX: तीसरा पैरामीटर "1" – startTx = true (RF भेजेगा)
+      RadioA.writeFast(_junk, 32, 1);
+      RadioB.writeFast(_junk, 32, 1);
+      RadioC.writeFast(_junk, 32, 1);
 
       _btIndex++;
       xSemaphoreGive(_btSpiMutex);
@@ -170,7 +170,6 @@ bool startBtJammer() {
 
   LOG_I("BTJAM", "Starting BT Classic Jammer...");
 
-  // 🔥 कम से कम एक बार channelCount compute करें
   if (_channelCount == 0) {
     size_t minSize = sizeof(oddChannels);
     if (sizeof(evenChannels) < minSize) minSize = sizeof(evenChannels);
