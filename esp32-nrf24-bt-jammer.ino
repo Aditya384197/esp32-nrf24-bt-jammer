@@ -1,7 +1,6 @@
 /*
- * bt_jammer.ino – Bluetooth Classic Jammer (Single‑File Arduino)
- * Based on cifertech/nrfbox, ported to a single .ino for Arduino IDE / CLI.
- * Uses 3x nRF24L01+ modules on SPI.
+ * esp32-nrf24-bt-jammer.ino – Bluetooth Classic Jammer (Single‑File Arduino)
+ * Uses 3x nRF24L01+ modules.
  * 
  * Serial Commands:
  *   start   – start jamming
@@ -39,8 +38,8 @@ static RF24 RadioA(NRF_CE_PIN_A, NRF_CSN_PIN_A);
 static RF24 RadioB(NRF_CE_PIN_B, NRF_CSN_PIN_B);
 static RF24 RadioC(NRF_CE_PIN_C, NRF_CSN_PIN_C);
 
-// ─── Channel Tables ────────────────────────────────────────
-static const uint8_t oddChannels[256] = {
+// ─── Channel Tables (no explicit size – compiler counts) ─
+static const uint8_t oddChannels[] = {
   1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,
   1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,
   1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,
@@ -49,7 +48,7 @@ static const uint8_t oddChannels[256] = {
   1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47,49,51,53,55,57,59,61,63
 };
 
-static const uint8_t evenChannels[256] = {
+static const uint8_t evenChannels[] = {
   78,76,74,72,70,68,66,64,62,60,58,56,54,52,50,48,46,44,42,40,38,36,34,32,30,28,26,24,22,20,18,16,14,12,10,8,6,4,2,0,
   78,76,74,72,70,68,66,64,62,60,58,56,54,52,50,48,46,44,42,40,38,36,34,32,30,28,26,24,22,20,18,16,14,12,10,8,6,4,2,0,
   78,76,74,72,70,68,66,64,62,60,58,56,54,52,50,48,46,44,42,40,38,36,34,32,30,28,26,24,22,20,18,16,14,12,10,8,6,4,2,0,
@@ -59,7 +58,7 @@ static const uint8_t evenChannels[256] = {
   78,76,74,72,70,68,66,64,62,60,58,56,54,52,50,48,46,44,42,40
 };
 
-static const uint8_t mixedChannels[256] = {
+static const uint8_t mixedChannels[] = {
   40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,10,12,
   4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74,76,78,1,3,
   5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,2,4,6,
@@ -74,7 +73,7 @@ static volatile bool _btActive = false;
 static volatile bool _btStopping = false;
 static volatile uint8_t _btIndex = 0;
 static SemaphoreHandle_t _btSpiMutex = NULL;
-static TaskHandle_t _btJammerTask = NULL;
+static TaskHandle_t _btJammerTaskHandle = NULL;   // 🔥 name changed
 static uint8_t _junk[32];
 
 // ─── Configure nRF24 ──────────────────────────────────────
@@ -86,7 +85,7 @@ static void _configRadio(RF24& radio) {
   radio.setPALevel(RF24_PA_MAX);
   radio.setPayloadSize(32);
   radio.stopListening();
-  radio.setSPISpeed(10000000);
+  // 🔥 setSPISpeed removed – not needed
 }
 
 // ─── Jammer Task ───────────────────────────────────────────
@@ -125,9 +124,10 @@ static void _btJammerTask(void* pv) {
     }
 
     if (xSemaphoreTake(_btSpiMutex, 0) == pdTRUE) {
-      RadioA.write_register(0x05, oddChannels[_btIndex]);
-      RadioB.write_register(0x05, evenChannels[_btIndex]);
-      RadioC.write_register(0x05, mixedChannels[_btIndex]);
+      // 🔥 write_register replaced with setChannel
+      RadioA.setChannel(oddChannels[_btIndex]);
+      RadioB.setChannel(evenChannels[_btIndex]);
+      RadioC.setChannel(mixedChannels[_btIndex]);
 
       RadioA.flush_tx();
       RadioB.flush_tx();
@@ -156,21 +156,20 @@ static void _btJammerTask(void* pv) {
   digitalWrite(NRF_CE_PIN_B, LOW);
   digitalWrite(NRF_CE_PIN_C, LOW);
 
-  _btJammerTask = NULL;
+  _btJammerTaskHandle = NULL;
   vTaskDelete(NULL);
 }
 
 // ─── Public API ────────────────────────────────────────────
 
 bool startBtJammer() {
-  if (_btJammerTask != NULL) {
+  if (_btJammerTaskHandle != NULL) {
     LOG_I("BTJAM", "BT Jammer already running");
     return false;
   }
 
   LOG_I("BTJAM", "Starting BT Classic Jammer...");
 
-  // Disable Wi-Fi and BT (if active)
   esp_wifi_stop();
   esp_wifi_deinit();
   esp_bt_controller_deinit();
@@ -195,12 +194,12 @@ bool startBtJammer() {
   _btIndex = 0;
 
   BaseType_t res = xTaskCreatePinnedToCore(
-    _btJammerTask,
+    _btJammerTask,                 // function
     "bt_jammer",
     4096,
     NULL,
     24,
-    &_btJammerTask,
+    &_btJammerTaskHandle,          // 🔥 handle variable
     0
   );
 
@@ -215,7 +214,7 @@ bool startBtJammer() {
 }
 
 bool stopBtJammer() {
-  if (_btJammerTask == NULL) {
+  if (_btJammerTaskHandle == NULL) {
     LOG_W("BTJAM", "BT Jammer not running");
     return false;
   }
@@ -226,13 +225,13 @@ bool stopBtJammer() {
   _btStopping = true;
 
   uint32_t timeout = millis() + 2000;
-  while (_btJammerTask != NULL && millis() < timeout) {
+  while (_btJammerTaskHandle != NULL && millis() < timeout) {
     vTaskDelay(pdMS_TO_TICKS(10));
   }
 
-  if (_btJammerTask != NULL) {
-    vTaskDelete(_btJammerTask);
-    _btJammerTask = NULL;
+  if (_btJammerTaskHandle != NULL) {
+    vTaskDelete(_btJammerTaskHandle);
+    _btJammerTaskHandle = NULL;
   }
 
   if (_btSpiMutex != NULL) {
@@ -248,7 +247,7 @@ bool stopBtJammer() {
 }
 
 bool btJammerIsActive() {
-  return _btActive && _btJammerTask != NULL;
+  return _btActive && _btJammerTaskHandle != NULL;
 }
 
 bool btJammerToggle() {
