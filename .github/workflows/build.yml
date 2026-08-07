@@ -31,11 +31,16 @@ jobs:
 
       - name: Compile Sketch
         run: |
-          arduino-cli compile --fqbn esp32:esp32:esp32 esp32-nrf24-bt-jammer.ino
+          arduino-cli compile --fqbn esp32:esp32:esp32 --build-path build esp32-nrf24-bt-jammer.ino
+
+      - name: List build files (debug)
+        run: |
+          ls -la build/
+          find build -name "*.bin" -type f
 
       - name: Upload Firmware Artifact
         uses: actions/upload-artifact@v4
         with:
           name: bt-jammer-firmware
-          path: build/**/*.bin
+          path: build/*.bin
           retention-days: 30
