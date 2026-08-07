@@ -23,11 +23,11 @@
 
 // ─── Pin Definitions ──────────────────────────────────────
 #define NRF_CE_PIN_A   4
-#define NRF_CSN_PIN_A  5
-#define NRF_CE_PIN_B   6
-#define NRF_CSN_PIN_B  7
-#define NRF_CE_PIN_C   8
-#define NRF_CSN_PIN_C  9
+#define NRF_CSN_PIN_A  16
+#define NRF_CE_PIN_B   5
+#define NRF_CSN_PIN_B  17
+#define NRF_CE_PIN_C   22
+#define NRF_CSN_PIN_C  21
 
 // ─── RF24 Objects ──────────────────────────────────────────
 static RF24 RadioA(NRF_CE_PIN_A, NRF_CSN_PIN_A);
