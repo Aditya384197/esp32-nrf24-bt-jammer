@@ -28,7 +28,7 @@
 #define NRF_CE_PIN_C  8
 #define NRF_CSN_PIN_C 9
 
-// ─── Logging Macros (simple) ─────────────────────────────
+// ─── Logging Macros ────────────────────────────────────────
 #define LOG_I(tag, fmt, ...) Serial.printf("[%s] " fmt "\n", tag, ##__VA_ARGS__)
 #define LOG_E(tag, fmt, ...) Serial.printf("[%s] ERROR: " fmt "\n", tag, ##__VA_ARGS__)
 #define LOG_W(tag, fmt, ...) Serial.printf("[%s] WARN: " fmt "\n", tag, ##__VA_ARGS__)
@@ -38,8 +38,8 @@ static RF24 RadioA(NRF_CE_PIN_A, NRF_CSN_PIN_A);
 static RF24 RadioB(NRF_CE_PIN_B, NRF_CSN_PIN_B);
 static RF24 RadioC(NRF_CE_PIN_C, NRF_CSN_PIN_C);
 
-// ─── Channel Tables – explicit [256] to avoid out-of-bounds ──
-static const uint8_t oddChannels[256] = {
+// ─── Channel Tables – WITHOUT explicit size ──────────────
+static const uint8_t oddChannels[] = {
   1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,
   1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,
   1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,
@@ -48,7 +48,7 @@ static const uint8_t oddChannels[256] = {
   1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47,49,51,53,55,57,59,61,63
 };
 
-static const uint8_t evenChannels[256] = {
+static const uint8_t evenChannels[] = {
   78,76,74,72,70,68,66,64,62,60,58,56,54,52,50,48,46,44,42,40,38,36,34,32,30,28,26,24,22,20,18,16,14,12,10,8,6,4,2,0,
   78,76,74,72,70,68,66,64,62,60,58,56,54,52,50,48,46,44,42,40,38,36,34,32,30,28,26,24,22,20,18,16,14,12,10,8,6,4,2,0,
   78,76,74,72,70,68,66,64,62,60,58,56,54,52,50,48,46,44,42,40,38,36,34,32,30,28,26,24,22,20,18,16,14,12,10,8,6,4,2,0,
@@ -58,7 +58,7 @@ static const uint8_t evenChannels[256] = {
   78,76,74,72,70,68,66,64,62,60,58,56,54,52,50,48,46,44,42,40
 };
 
-static const uint8_t mixedChannels[256] = {
+static const uint8_t mixedChannels[] = {
   40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,10,12,
   4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74,76,78,1,3,
   5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,2,4,6,
@@ -71,10 +71,11 @@ static const uint8_t mixedChannels[256] = {
 // ─── Global State ──────────────────────────────────────────
 static volatile bool _btActive = false;
 static volatile bool _btStopping = false;
-static volatile uint8_t _btIndex = 0;
+static volatile uint16_t _btIndex = 0;        // 🔥 uint16_t ताकि साइज़ 256 तक जा सके
 static SemaphoreHandle_t _btSpiMutex = NULL;
 static TaskHandle_t _btJammerTaskHandle = NULL;
 static uint8_t _junk[32];
+static size_t _channelCount = 0;              // तीनों ऐरे में सबसे छोटा साइज़
 
 // ─── Configure nRF24 ──────────────────────────────────────
 static void _configRadio(RF24& radio) {
@@ -123,9 +124,10 @@ static void _btJammerTask(void* pv) {
     }
 
     if (xSemaphoreTake(_btSpiMutex, 0) == pdTRUE) {
-      RadioA.setChannel(oddChannels[_btIndex]);
-      RadioB.setChannel(evenChannels[_btIndex]);
-      RadioC.setChannel(mixedChannels[_btIndex]);
+      // 🔥 अब _btIndex को channelCount के हिसाब से रखें
+      RadioA.setChannel(oddChannels[_btIndex % _channelCount]);
+      RadioB.setChannel(evenChannels[_btIndex % _channelCount]);
+      RadioC.setChannel(mixedChannels[_btIndex % _channelCount]);
 
       RadioA.flush_tx();
       RadioB.flush_tx();
@@ -167,6 +169,15 @@ bool startBtJammer() {
   }
 
   LOG_I("BTJAM", "Starting BT Classic Jammer...");
+
+  // 🔥 कम से कम एक बार channelCount compute करें
+  if (_channelCount == 0) {
+    size_t minSize = sizeof(oddChannels);
+    if (sizeof(evenChannels) < minSize) minSize = sizeof(evenChannels);
+    if (sizeof(mixedChannels) < minSize) minSize = sizeof(mixedChannels);
+    _channelCount = minSize;
+    LOG_I("BTJAM", "Channel count = %u", _channelCount);
+  }
 
   esp_wifi_stop();
   esp_wifi_deinit();
