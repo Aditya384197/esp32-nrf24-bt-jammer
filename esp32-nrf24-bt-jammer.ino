@@ -230,6 +230,9 @@ bool btJammerToggle() {
 
 // ─── Setup / Loop ──────────────────────────────────────────
 void setup() {
+  // 🔥 Disable watchdog on core 0 to prevent TG1WDT_SYS_RESET
+  disableCore0WDT();
+
   Serial.begin(115200);
   delay(500);
 
