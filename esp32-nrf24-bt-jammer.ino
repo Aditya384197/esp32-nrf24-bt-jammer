@@ -1,5 +1,6 @@
 /*
  * esp32-nrf24-bt-jammer.ino – Bluetooth Classic Jammer (Single‑File Arduino)
+ * Timing: Channel hop every ~135 µs + 5 µs delay after each write.
  * Uses 3x nRF24L01+ modules.
  * 
  * Serial Commands:
@@ -38,7 +39,7 @@ static RF24 RadioA(NRF_CE_PIN_A, NRF_CSN_PIN_A);
 static RF24 RadioB(NRF_CE_PIN_B, NRF_CSN_PIN_B);
 static RF24 RadioC(NRF_CE_PIN_C, NRF_CSN_PIN_C);
 
-// ─── Channel Tables ────────────────────────────────────────
+// ─── Channel Tables (same as before) ──────────────────────
 static const uint8_t oddChannels[] = {
   1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,
   1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,
@@ -124,18 +125,23 @@ static void _btJammerTask(void* pv) {
     }
 
     if (xSemaphoreTake(_btSpiMutex, 0) == pdTRUE) {
+      // ── Set channels ──
       RadioA.setChannel(oddChannels[_btIndex % _channelCount]);
       RadioB.setChannel(evenChannels[_btIndex % _channelCount]);
       RadioC.setChannel(mixedChannels[_btIndex % _channelCount]);
 
+      // ── Flush TX FIFO ──
       RadioA.flush_tx();
       RadioB.flush_tx();
       RadioC.flush_tx();
 
-      // 🔥 FIX: तीसरा पैरामीटर "1" – startTx = true (RF भेजेगा)
+      // ── Write junk packets (startTx = 1) ──
       RadioA.writeFast(_junk, 32, 1);
+      esp_rom_delay_us(5);   // 🔥 5 µs delay after each radio
       RadioB.writeFast(_junk, 32, 1);
+      esp_rom_delay_us(5);
       RadioC.writeFast(_junk, 32, 1);
+      esp_rom_delay_us(5);
 
       _btIndex++;
       xSemaphoreGive(_btSpiMutex);
@@ -143,7 +149,8 @@ static void _btJammerTask(void* pv) {
       _btIndex++;
     }
 
-    esp_rom_delay_us(120);
+    // ── Main delay: channel hopping interval ──
+    esp_rom_delay_us(135);   // 🔥 135 µs (was 120)
   }
 
   RadioA.powerDown();
@@ -271,7 +278,8 @@ bool btJammerToggle() {
 void setup() {
   Serial.begin(115200);
   while (!Serial) { ; }
-  Serial.println("\nESP32 BT Classic Jammer (Single‑File)");
+  Serial.println("\nESP32 BT Classic Jammer (Timing Optimized)");
+  Serial.println("Channel hop: 135 µs + 5 µs post-write delay");
   Serial.println("Commands: start, stop, status, toggle, help");
 }
 
