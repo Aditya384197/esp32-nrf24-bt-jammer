@@ -1,0 +1,2 @@
+dependencies:
+  espressif/rf24: "^2.0.0"   # नवीनतम version के अनुसार बदलें
