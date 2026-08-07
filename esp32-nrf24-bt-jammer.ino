@@ -38,8 +38,8 @@ static RF24 RadioA(NRF_CE_PIN_A, NRF_CSN_PIN_A);
 static RF24 RadioB(NRF_CE_PIN_B, NRF_CSN_PIN_B);
 static RF24 RadioC(NRF_CE_PIN_C, NRF_CSN_PIN_C);
 
-// ─── Channel Tables (no explicit size – compiler counts) ─
-static const uint8_t oddChannels[] = {
+// ─── Channel Tables – explicit [256] to avoid out-of-bounds ──
+static const uint8_t oddChannels[256] = {
   1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,
   1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,
   1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,
@@ -48,7 +48,7 @@ static const uint8_t oddChannels[] = {
   1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47,49,51,53,55,57,59,61,63
 };
 
-static const uint8_t evenChannels[] = {
+static const uint8_t evenChannels[256] = {
   78,76,74,72,70,68,66,64,62,60,58,56,54,52,50,48,46,44,42,40,38,36,34,32,30,28,26,24,22,20,18,16,14,12,10,8,6,4,2,0,
   78,76,74,72,70,68,66,64,62,60,58,56,54,52,50,48,46,44,42,40,38,36,34,32,30,28,26,24,22,20,18,16,14,12,10,8,6,4,2,0,
   78,76,74,72,70,68,66,64,62,60,58,56,54,52,50,48,46,44,42,40,38,36,34,32,30,28,26,24,22,20,18,16,14,12,10,8,6,4,2,0,
@@ -58,7 +58,7 @@ static const uint8_t evenChannels[] = {
   78,76,74,72,70,68,66,64,62,60,58,56,54,52,50,48,46,44,42,40
 };
 
-static const uint8_t mixedChannels[] = {
+static const uint8_t mixedChannels[256] = {
   40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,10,12,
   4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74,76,78,1,3,
   5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47,49,51,53,55,57,59,61,63,65,67,69,71,73,75,77,2,4,6,
@@ -73,7 +73,7 @@ static volatile bool _btActive = false;
 static volatile bool _btStopping = false;
 static volatile uint8_t _btIndex = 0;
 static SemaphoreHandle_t _btSpiMutex = NULL;
-static TaskHandle_t _btJammerTaskHandle = NULL;   // 🔥 name changed
+static TaskHandle_t _btJammerTaskHandle = NULL;
 static uint8_t _junk[32];
 
 // ─── Configure nRF24 ──────────────────────────────────────
@@ -85,7 +85,6 @@ static void _configRadio(RF24& radio) {
   radio.setPALevel(RF24_PA_MAX);
   radio.setPayloadSize(32);
   radio.stopListening();
-  // 🔥 setSPISpeed removed – not needed
 }
 
 // ─── Jammer Task ───────────────────────────────────────────
@@ -124,7 +123,6 @@ static void _btJammerTask(void* pv) {
     }
 
     if (xSemaphoreTake(_btSpiMutex, 0) == pdTRUE) {
-      // 🔥 write_register replaced with setChannel
       RadioA.setChannel(oddChannels[_btIndex]);
       RadioB.setChannel(evenChannels[_btIndex]);
       RadioC.setChannel(mixedChannels[_btIndex]);
@@ -194,12 +192,12 @@ bool startBtJammer() {
   _btIndex = 0;
 
   BaseType_t res = xTaskCreatePinnedToCore(
-    _btJammerTask,                 // function
+    _btJammerTask,
     "bt_jammer",
     4096,
     NULL,
     24,
-    &_btJammerTaskHandle,          // 🔥 handle variable
+    &_btJammerTaskHandle,
     0
   );
 
